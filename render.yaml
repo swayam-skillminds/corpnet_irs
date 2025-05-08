@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: salesforce-irs-app
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker main_FAST:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.18
