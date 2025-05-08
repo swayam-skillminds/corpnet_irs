@@ -8,3 +8,4 @@ selenium==4.11.2
 pydantic==2.3.0
 python-multipart==0.0.6
 gunicorn==21.2.0
+webdriver-manager
