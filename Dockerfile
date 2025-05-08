@@ -1,12 +1,15 @@
 # Use a slim Python 3.11 base image to keep the image size small
 FROM python:3.11-slim
 
+# Set a reliable Debian package source
+RUN echo "deb http://deb.debian.org/debian-security bullseye-security main" > /etc/apt/sources.list \
+    && echo "deb http://deb.debian.org/debian bullseye main" >> /etc/apt/sources.list
+
 # Install system dependencies required for Chrome, ChromeDriver, and general utilities
 RUN apt-get update && apt-get install -y \
     wget gnupg ca-certificates unzip \
-    libglib2.0-0 libnss3 libgconf-2-4 libfontconfig1 \
-    libxss1 libappindicator3-1 libindicator3-7 \
-    libpango-1.0-0 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 \
+    libglib2.0-0 libnss3 libfontconfig1 \
+    libxss1 libpango-1.0-0 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Google Chrome repository and install Chrome
