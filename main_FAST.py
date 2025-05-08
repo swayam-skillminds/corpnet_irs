@@ -406,7 +406,7 @@ def run_irs_ein_application():
     options.add_argument('--disable-infobars')
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--start-maximized')
-    options.binary_location = "/usr/bin/google-chrome-stable"
+    # options.binary_location = "/usr/bin/google-chrome-stable"
     
     prefs = {
         "profile.default_content_setting_values": {
@@ -423,7 +423,8 @@ def run_irs_ein_application():
 
     driver = None
     try:
-        driver = uc.Chrome(options=options)
+        from selenium import webdriver
+        driver = webdriver.Chrome(options=options)
         wait = WebDriverWait(driver, 10)
         actions = ActionChains(driver)
         
