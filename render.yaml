@@ -6,6 +6,8 @@ services:
     envVars:
       - key: API_KEY
         sync: false # This will prompt you to enter the value during deployment
+      - key: PORT 
+        value: 10000 # Render's default web service port
     disk:
       name: data
       mountPath: /app/data
