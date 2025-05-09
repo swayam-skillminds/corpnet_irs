@@ -51,4 +51,9 @@ COPY . .
 USER appuser
 
 # Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT:-8000}"]
+# Create a startup script to handle the PORT environment variable
+COPY startup.sh /app/startup.sh
+RUN chmod +x /app/startup.sh
+
+# Command to run the application
+CMD ["/app/startup.sh"]
