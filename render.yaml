@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: salesforce-irs-app
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker main_FAST:app
+    name: salesforce-irs-ein-api
+    env: docker
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.18
+      - key: API_KEY
+        sync: false # This will prompt you to enter the value during deployment
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1
