@@ -4,6 +4,7 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV TZ=America/New_York
+ENV PORT=8000
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -47,13 +48,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Make scripts executable if any
+RUN if [ -f "*.sh" ]; then chmod +x *.sh; fi
+
 # Run as non-root user
 USER appuser
 
-# Command to run the application
-# Create a startup script to handle the PORT environment variable
-COPY startup.sh /app/startup.sh
-RUN chmod +x /app/startup.sh
-
-# Command to run the application
-CMD ["/app/startup.sh"]
+# Command to run the application with a shell to process the environment variable
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT
