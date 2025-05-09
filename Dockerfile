@@ -1,45 +1,54 @@
-# Use a slim Python 3.11 base image to keep the image size small
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-# Set a reliable Debian package source
-RUN echo "deb http://deb.debian.org/debian-security bullseye-security main" > /etc/apt/sources.list \
-    && echo "deb http://deb.debian.org/debian bullseye main" >> /etc/apt/sources.list
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV TZ=America/New_York
 
-# Install system dependencies required for Chrome, ChromeDriver, and general utilities
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    wget gnupg ca-certificates unzip \
-    libglib2.0-0 libnss3 libfontconfig1 \
-    libxss1 libpango-1.0-0 libatk1.0-0 libatk-bridge2.0-0 libgtk-3-0 \
+    wget \
+    gnupg \
+    unzip \
+    xvfb \
+    libxi6 \
+    libgconf-2-4 \
+    default-jdk \
+    libglib2.0-0 \
+    libnss3 \
+    libgdk-pixbuf2.0-0 \
+    libgtk-3-0 \
+    libdbus-glib-1-2 \
+    libatk1.0-0 \
+    libxss1 \
+    libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Add Google Chrome repository and install Chrome
-RUN wget -q -O /tmp/google-chrome-key.asc https://dl.google.com/linux/linux_signing_key.pub \
-    && gpg --dearmor /tmp/google-chrome-key.asc \
-    && mv /tmp/google-chrome-key.asc.gpg /etc/apt/trusted.gpg.d/ \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update && apt-get install -y google-chrome-stable
+# Install Chrome
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver using the Chrome for Testing API
-RUN CHROME_MAJOR_VERSION=$(google-chrome --version | grep -oP '\d+' | head -1) \
-    && LATEST_DRIVER_URL=$(wget -qO- "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR_VERSION}") \
-    && wget -O /tmp/chromedriver.zip "https://storage.googleapis.com/chrome-for-testing-public/${LATEST_DRIVER_URL}/linux64/chromedriver-linux64.zip" \
-    && unzip /tmp/chromedriver.zip -d /tmp/ \
-    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/ \
-    && chmod +x /usr/local/bin/chromedriver \
-    && rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
+# Create and use a non-root user
+RUN groupadd -g 1000 appuser && \
+    useradd -u 1000 -g appuser -s /bin/bash -m appuser
 
-# Set the working directory inside the container
+# Set up working directory
 WORKDIR /app
 
-# Copy the requirements.txt file and install Python dependencies
+# Copy requirements file
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire application code
+# Copy application code
 COPY . .
 
-# Expose port 8000 for the FastAPI app
-EXPOSE 8000
+# Run as non-root user
+USER appuser
 
-# Command to run the FastAPI app with Uvicorn
-CMD ["uvicorn", "main_FAST:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${PORT:-8000}"]
