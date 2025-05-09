@@ -4,7 +4,8 @@ pydantic==2.3.0
 selenium==4.12.0
 undetected-chromedriver==3.5.3
 beautifulsoup4==4.12.2
-pandas==2.1.0
 httpx==0.25.0
 python-multipart==0.0.6
 lxml==4.9.3
+numpy==1.23.5 
+pandas==1.5.3
