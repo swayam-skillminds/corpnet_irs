@@ -1,14 +1,17 @@
 services:
   - type: web
     name: salesforce-irs-ein-api
-    env: docker
-    dockerfilePath: ./Dockerfile
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker --workers 1 --timeout 600 main:app
+    plan: standard
     envVars:
       - key: API_KEY
-        sync: false # This will prompt you to enter the value during deployment
-      - key: PORT 
-        value: 10000 # Render's default web service port
-    disk:
-      name: data
-      mountPath: /app/data
-      sizeGB: 1
+        sync: false
+      - key: CHROME_BIN
+        value: /usr/bin/google-chrome-stable
+      - key: CHROMEDRIVER_PATH
+        value: /usr/local/bin/chromedriver
+    scaling:
+      minInstances: 1
+      maxInstances: 1
