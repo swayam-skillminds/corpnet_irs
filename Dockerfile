@@ -1,40 +1,57 @@
-FROM python:3.10-slim
+FROM python:3.9-slim
 
-# Install Chrome and dependencies
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install dependencies
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    curl \
     unzip \
-    xvfb \
-    libxi6 \
-    libgconf-2-4 \
-    libnss3 \
-    libglib2.0-0 \
-    libfontconfig \
-    libx11-xcb1 \
-    libxcb-dri3-0 \
-    libxtst6 \
-    libxss1 \
-    libasound2 \
+    curl \
     fonts-liberation \
-    libappindicator3-1 \
-    xdg-utils
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libatspi2.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    xdg-utils \
+    xvfb \
+    --no-install-recommends \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Chrome
+# Install Google Chrome
 RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
     && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
     && apt-get update \
-    && apt-get install -y google-chrome-stable
+    && apt-get install -y google-chrome-stable \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install ChromeDriver
-RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1) \
-    && CHROMEDRIVER_VERSION=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_$CHROME_VERSION") \
-    && wget -q "https://chromedriver.storage.googleapis.com/$CHROMEDRIVER_VERSION/chromedriver_linux64.zip" \
+# Install ChromeDriver - fixed version approach
+RUN CHROMEDRIVER_VERSION=114.0.5735.90 \
+    && wget -q "https://chromedriver.storage.googleapis.com/${CHROMEDRIVER_VERSION}/chromedriver_linux64.zip" \
     && unzip chromedriver_linux64.zip \
     && mv chromedriver /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
     && rm chromedriver_linux64.zip
+
+# Create a non-root user to run the application
+RUN useradd -m appuser
 
 # Set working directory
 WORKDIR /app
@@ -43,11 +60,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy the application code
 COPY . .
 
-# Expose port
+# Change ownership to the non-root user
+RUN chown -R appuser:appuser /app
+
+# Switch to the non-root user
+USER appuser
+
+# Expose the port the app runs on
 EXPOSE 8000
 
-# Run the FastAPI application
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "--workers", "1", "--timeout", "600", "--bind", "0.0.0.0:8000", "main:app"]
+# Command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
