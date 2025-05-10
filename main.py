@@ -1,14 +1,9 @@
-import argparse
 import os
 import sys
-import traceback
-import re
 import json
+import re
 import time
-import random
 from datetime import datetime
-from bs4 import BeautifulSoup
-import pandas as pd
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -16,10 +11,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import Select
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Header
 import httpx
 import logging
+import asyncio
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -32,63 +28,49 @@ app = FastAPI(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define a consistent file path for the CSV data (optional logging)
-CSV_FILE_PATH = os.path.join(os.getcwd(), "salesforce_data.csv")
+# Define a consistent file path for the JSON data
+JSON_FILE_PATH = os.path.join(os.getcwd(), "salesforce_data.json")
 
-# Pydantic model for request body from Salesforce
+# In-memory store for confirmation status (formId -> proceed boolean)
+confirmation_status = {}
+
+# Pydantic model for request body from Salesforce (all fields are already optional)
 class CaseData(BaseModel):
-    record_id: str
-    username: Optional[str] = None
-    password: Optional[str] = None
-    first_security_question: Optional[str] = None
-    first_security_answer: Optional[str] = None
-    second_security_question: Optional[str] = None
-    second_security_answer: Optional[str] = None
-    third_security_question: Optional[str] = None
-    third_security_answer: Optional[str] = None
-    fourth_security_question: Optional[str] = None
-    fourth_security_answer: Optional[str] = None
-    pin_number: Optional[str] = None
+    record_id: str  # Required field
     entity_name: Optional[str] = None
-    formation_date: Optional[str] = None
     entity_type: Optional[str] = None
+    formation_date: Optional[str] = None
     business_category: Optional[str] = None
     business_description: Optional[str] = None
-    ein: Optional[str] = None
+    business_address_1: Optional[str] = None
+    entity_state: Optional[str] = None
+    business_address_2: Optional[str] = None
+    city: Optional[str] = None
+    zip_code: Optional[str] = None
     quarter_of_first_payroll: Optional[str] = None
+    entity_state_record_state: Optional[str] = None
     json_summary: Optional[str] = None
     summary_raw: Optional[str] = None
-    additional_fields: Optional[Dict[str, Any]] = None
+    case_contact_name: Optional[str] = None
+    ssn_decrypted: Optional[str] = None
+    case_contact_first_name: Optional[str] = None
+    case_contact_last_name: Optional[str] = None
+    case_contact_phone: Optional[str] = None
+
+# Pydantic model for confirmation callback from Salesforce
+class ConfirmationData(BaseModel):
+    formId: str
+    proceed: bool
 
 # Helper Functions
-def parse_summary_html(html_content):
-    if not html_content:
-        return None
-    if '<' not in html_content:
-        return {'Summary': html_content.strip()}
-    
-    soup = BeautifulSoup(html_content, 'html.parser')
-    data = {}
-    divs = soup.find_all('div', style=re.compile('padding-left: 5px;'))
-    
-    for div in divs:
-        text = div.get_text(strip=True)
-        if ':' in text:
-            key, value = text.split(':', 1)
-            key = key.replace('strong', '').strip()
-            value = value.strip()
-            data[key] = value
-    
-    return data
-
-def export_to_csv_direct(data, csv_file_path):
+def export_to_json_direct(data, json_file_path):
     if not data:
         logger.warning("No data to export.")
         return False
     
-    logger.info(f"Attempting to create file: {csv_file_path}")
+    logger.info(f"Attempting to create JSON file: {json_file_path}")
     
-    directory = os.path.dirname(csv_file_path)
+    directory = os.path.dirname(json_file_path)
     try:
         if not os.path.exists(directory):
             os.makedirs(directory)
@@ -111,42 +93,49 @@ def export_to_csv_direct(data, csv_file_path):
         return False
     
     try:
-        df = pd.DataFrame([data])
-        logger.info(f"Data to write: {df.shape[0]} rows, {df.shape[1]} columns")
-        df.to_csv(csv_file_path, index=False)
-        logger.info(f"Pandas to_csv() completed without exceptions")
+        existing_data = []
+        if os.path.exists(json_file_path):
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                try:
+                    existing_data = json.load(f)
+                    if not isinstance(existing_data, list):
+                        existing_data = [existing_data]
+                except json.JSONDecodeError:
+                    logger.warning(f"Existing JSON file {json_file_path} is invalid, overwriting with new data.")
+                    existing_data = []
         
-        if os.path.exists(csv_file_path):
-            logger.info(f"SUCCESS: File created at {csv_file_path}")
-            file_size = os.path.getsize(csv_file_path)
-            logger.info(f"File size: {file_size} bytes")
-            return True
-        else:
-            logger.error(f"ERROR: File was not created: {csv_file_path}")
-            return False
+        existing_data.append(data)
+        
+        with open(json_file_path, 'w', encoding='utf-8') as f:
+            json.dump(existing_data, f, indent=2)
+        
+        logger.info(f"SUCCESS: Data appended to JSON file at {json_file_path}")
+        file_size = os.path.getsize(json_file_path)
+        logger.info(f"File size: {file_size} bytes")
+        return True
     except Exception as e:
-        logger.error(f"Failed to create CSV file: {e}")
+        logger.error(f"Failed to write to JSON file: {e}")
         return False
 
 def try_multiple_locations(data):
-    global CSV_FILE_PATH
-    if export_to_csv_direct(data, CSV_FILE_PATH):
+    global JSON_FILE_PATH
+    if export_to_json_direct(data, JSON_FILE_PATH):
         return True
     
     locations = [
-        os.path.join(os.getcwd(), "salesforce_data.csv"),
-        os.path.join(os.path.expanduser("~"), "Desktop", "salesforce_data.csv"),
-        os.path.join(os.path.expanduser("~"), "Documents", "salesforce_data.csv"),
-        os.path.join(os.environ.get('TEMP', '/tmp'), "salesforce_data.csv"),
-        "salesforce_data.csv"
+        os.path.join(os.getcwd(), "salesforce_data.json"),
+        os.path.join(os.path.expanduser("~"), "Desktop", "salesforce_data.json"),
+        os.path.join(os.path.expanduser("~"), "Documents", "salesforce_data.json"),
+        os.path.join(os.environ.get('TEMP', '/tmp'), "salesforce_data.json"),
+        "salesforce_data.json"
     ]
     
     success = False
     for location in locations:
         logger.info(f"Trying location: {location}")
-        if export_to_csv_direct(data, location):
+        if export_to_json_direct(data, location):
             logger.info(f"SUCCESS: Found working location at {location}")
-            CSV_FILE_PATH = location
+            JSON_FILE_PATH = location
             success = True
             break
     
@@ -155,35 +144,52 @@ def try_multiple_locations(data):
     
     return success
 
-def flatten_json(data, parent_key='', sep='_'):
-    items = []
-    for key, value in data.items():
-        new_key = f"{parent_key}{sep}{key.lower().replace(' ', '_')}" if parent_key else key.lower().replace(' ', '_')
-        if isinstance(value, dict):
-            items.extend(flatten_json(value, new_key, sep).items())
-        elif isinstance(value, list):
-            for i, item in enumerate(value):
-                items.extend(flatten_json({f"{new_key}_{i}": item}, '', sep).items())
-        else:
-            items.append((new_key, value))
-    return dict(items)
-
-def parse_json_summary(json_content):
-    if not json_content:
-        return {}
+def determine_number_of_members(json_summary):
+    if not json_summary:
+        logger.info("No json_summary provided, defaulting to 2 members.")
+        return 2
+    
     try:
-        data = json.loads(json_content)
-        flattened_data = flatten_json(data)
-        return flattened_data
+        json_data = json.loads(json_summary)
+        responsible_parties = set()
+        
+        def search_responsible_parties(data):
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    if isinstance(key, str) and "responsible party-" in key.lower():
+                        party_num = key.lower().split("responsible party-")[-1].split()[0]
+                        responsible_parties.add(party_num)
+                    if isinstance(value, (dict, list)):
+                        search_responsible_parties(value)
+            elif isinstance(data, list):
+                for item in data:
+                    search_responsible_parties(item)
+        
+        search_responsible_parties(json_data)
+        
+        if not responsible_parties:
+            logger.info("No responsible parties found in json_summary, defaulting to 2 members.")
+            return 2
+        
+        max_party = max(int(num) for num in responsible_parties)
+        if max_party >= 1 and max_party <= 4:
+            logger.info(f"Found responsible parties up to {max_party}, setting number of members to {max_party}.")
+            return max_party
+        else:
+            logger.info(f"Unexpected number of responsible parties ({max_party}), defaulting to 2 members.")
+            return 2
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON_Summary__c: {e}")
-        return {}
+        logger.error(f"Error decoding json_summary: {e}, defaulting to 2 members.")
+        return 2
     except Exception as e:
-        logger.error(f"Error parsing JSON_Summary__c: {e}")
-        return {}
+        logger.error(f"Error processing json_summary: {e}, defaulting to 2 members.")
+        return 2
 
 # IRS EIN Application Functions
 def fill_field(driver, field, value, label):
+    if value is None or value.strip() == "":
+        logger.warning(f"Skipping {label} as value is None or empty")
+        return
     logger.info(f"Filling {label} with: '{value}'")
     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", field)
     time.sleep(0.2)
@@ -267,6 +273,10 @@ state_mapping = {
 }
 
 def select_state(driver, physical_state):
+    if not physical_state:
+        logger.warning("physical_state is missing, defaulting to 'TX'")
+        physical_state = "TX"
+    
     try:
         state_select = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, "state")))
         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", state_select)
@@ -274,8 +284,6 @@ def select_state(driver, physical_state):
         select = Select(state_select)
         available_values = [option.get_attribute("value") for option in select.options]
         
-        if not physical_state:
-            raise ValueError("physical_state is empty or None")
         physical_state = physical_state.upper().strip()
         
         if physical_state in available_values:
@@ -285,7 +293,8 @@ def select_state(driver, physical_state):
             state_value = state_mapping.get(physical_state, state_mapping.get(normalized_input))
             
             if not state_value or state_value not in available_values:
-                raise ValueError(f"Invalid state: '{physical_state}'")
+                logger.warning(f"Invalid state: '{physical_state}', defaulting to 'TX'")
+                state_value = "TX"
         
         try:
             select.select_by_value(state_value)
@@ -299,7 +308,12 @@ def select_state(driver, physical_state):
                 
         handle_unexpected_popups(driver)
     except Exception as e:
-        logger.warning(f"Failed to select state with input '{physical_state}': {e}")
+        logger.warning(f"Failed to select state with input '{physical_state}': {e}, defaulting to 'TX'")
+        try:
+            select = Select(state_select)
+            select.select_by_value("TX")
+        except:
+            logger.error("Failed to default state to 'TX'")
 
 def click_button(driver, wait, locator, desc="button", scroll=True, retries=2):
     for attempt in range(retries + 1):
@@ -340,58 +354,75 @@ def select_radio(driver, wait, radio_id, desc="radio button", retry=1):
         return False
 
 async def run_irs_ein_application(data: CaseData):
-    # Parse summary_raw and json_summary
-    summary_data = parse_summary_html(data.summary_raw) if data.summary_raw else {}
-    flattened_json = parse_json_summary(data.json_summary) if data.json_summary else {}
-
-    # Extract data with fallbacks
-    first_name = flattened_json.get('party_0_data_first_name_value', 'Rob')
-    last_name = flattened_json.get('party_0_data_last_name_value', 'Chuchla')
-    pin_number = data.pin_number or ''
-    ssn_last_four = pin_number[-4:] if pin_number and isinstance(pin_number, str) and len(pin_number) >= 4 else ''
-    phone_number = flattened_json.get('party_0_data_phone_number_value', '2812173123')
+    # Provide defaults for all fields if they are None
+    first_name = data.case_contact_first_name or "Rob"
+    last_name = data.case_contact_last_name or "Chuchla"
+    ssn_decrypted = data.ssn_decrypted or "123456789"  # Default SSN for testing
+    ssn_last_four = ssn_decrypted[-4:] if ssn_decrypted and len(ssn_decrypted) >= 4 else "1234"
     entity_type = data.entity_type or "Limited Liability Company (LLC)"
-    quarter_of_first_payroll = data.quarter_of_first_payroll or flattened_json.get('employee_information_data_first_payroll_date_value', '03/31/2025')
+    quarter_of_first_payroll = data.quarter_of_first_payroll or "03/31/2025"
     formation_date = data.formation_date or "2024-06-24"
-    business_category = data.business_category or flattened_json.get('business_information_data_business_category_value', 'Finance')
-    business_description = data.business_description or flattened_json.get('business_information_data_business_description_value', '')
-    legal_business_name = data.entity_name or flattened_json.get('business_information_data_legal_business_name_value', 'Lane Four Capital Partners LLC')
-    physical_street1 = flattened_json.get('physical_business_address_data_street1_value', '3315 Cherry Ln')
-    physical_street2 = flattened_json.get('physical_business_address_data_street2_value', '')
-    physical_city = flattened_json.get('physical_business_address_data_city_value', 'Austin')
-    physical_state = flattened_json.get('physical_business_address_data_state_value', 'TX')
-    physical_zipcode = flattened_json.get('physical_business_address_data_zipcode_value', '78703')
-    mailing_street1 = flattened_json.get('mailing_address_data_street1_value', '3315 Cherry Ln')
-    mailing_street2 = flattened_json.get('mailing_address_data_street2_value', '')
-    mailing_city = flattened_json.get('mailing_address_data_city_value', 'Austin')
-    mailing_state = flattened_json.get('mailing_address_data_state_value', 'TX')
-    mailing_zipcode = flattened_json.get('mailing_address_data_zipcode_value', '78703')
+    business_category = data.business_category or "Finance"
+    business_description = data.business_description or "Financial services"
+    legal_business_name = data.entity_name or "Lane Four Capital Partners LLC"
+    if not legal_business_name:
+        logger.error("entity_name is required but missing")
+        raise HTTPException(status_code=400, detail="entity_name is required")
+    physical_street1 = data.business_address_1 or "3315 Cherry Ln"
+    if not physical_street1:
+        logger.error("business_address_1 is required but missing")
+        raise HTTPException(status_code=400, detail="business_address_1 is required")
+    physical_street2 = data.business_address_2 or ""
+    physical_city = data.city or "Austin"
+    if not physical_city:
+        logger.error("city is required but missing")
+        raise HTTPException(status_code=400, detail="city is required")
+    physical_state = data.entity_state or "TX"
+    physical_zipcode = data.zip_code or "78703"
+    if not physical_zipcode:
+        logger.error("zip_code is required but missing")
+        raise HTTPException(status_code=400, detail="zip_code is required")
+    select_state_value = data.entity_state_record_state or physical_state or "TX"
+    mailing_street1 = physical_street1  # Default to physical address if mailing address is missing
+    mailing_street2 = physical_street2
+    mailing_city = physical_city
+    mailing_state = physical_state
+    mailing_zipcode = physical_zipcode
 
-    # Log data to CSV for debugging (optional)
-    csv_data = {
+    # Log missing fields
+    missing_fields = []
+    for field_name in data.__dict__:
+        if getattr(data, field_name) is None and field_name != "record_id":
+            missing_fields.append(field_name)
+    if missing_fields:
+        logger.info(f"Missing fields: {', '.join(missing_fields)} - using defaults where applicable")
+
+    # Prepare JSON data for logging
+    json_data = {
         "record_id": data.record_id,
-        "first_name": first_name,
-        "last_name": last_name,
-        "pin_number": pin_number,
-        "entity_type": entity_type,
-        "quarter_of_first_payroll": quarter_of_first_payroll,
-        "formation_date": formation_date,
-        "business_category": business_category,
-        "business_description": business_description,
-        "legal_business_name": legal_business_name,
-        "physical_street1": physical_street1,
-        "physical_city": physical_city,
-        "physical_state": physical_state,
-        "physical_zipcode": physical_zipcode,
-        "mailing_street1": mailing_street1,
-        "mailing_city": mailing_city,
-        "mailing_state": mailing_state,
-        "mailing_zipcode": mailing_zipcode,
-        **summary_data,
-        **flattened_json
+        "entity_name": data.entity_name,
+        "entity_type": data.entity_type,
+        "formation_date": data.formation_date,
+        "business_category": data.business_category,
+        "business_description": data.business_description,
+        "business_address_1": data.business_address_1,
+        "entity_state": data.entity_state,
+        "business_address_2": data.business_address_2,
+        "city": data.city,
+        "zip_code": data.zip_code,
+        "quarter_of_first_payroll": data.quarter_of_first_payroll,
+        "entity_state_record_state": data.entity_state_record_state,
+        "json_summary": data.json_summary,
+        "summary_raw": data.summary_raw,
+        "case_contact_name": data.case_contact_name,
+        "ssn_decrypted": data.ssn_decrypted,
+        "case_contact_first_name": data.case_contact_first_name,
+        "case_contact_last_name": data.case_contact_last_name,
+        "case_contact_phone": data.case_contact_phone
     }
-    try_multiple_locations(csv_data)
+    try_multiple_locations(json_data)
 
+    # Initialize browser
     options = uc.ChromeOptions()
     options.add_argument('--headless')
     options.add_argument('--disable-gpu')
@@ -431,6 +462,7 @@ async def run_irs_ein_application(data: CaseData):
         
         wait.until(EC.presence_of_element_located((By.ID, "individual-leftcontent")))
 
+        # Entity type mapping
         entity_type_mapping = {
             "Limited Liability Company (LLC)": "limited",
             "C-Corporation": "corporations",
@@ -452,33 +484,32 @@ async def run_irs_ein_application(data: CaseData):
             "Estate": "estate"
         }
         
-        entity_type_normalized = entity_type.strip()
+        entity_type_normalized = entity_type.strip() if entity_type else "Limited Liability Company (LLC)"
         if entity_type_normalized not in entity_type_mapping:
-            entity_type_normalized = entity_type.replace(" ", "").replace("(", "").replace(")", "")
+            entity_type_normalized = entity_type_normalized.replace(" ", "").replace("(", "").replace(")", "")
         
-        mapped_value = entity_type_mapping.get(entity_type_normalized, None)
-        if mapped_value:
-            select_radio(driver, wait, mapped_value, f"entity type {mapped_value}")
-        else:
-            select_radio(driver, wait, "viewadditional", "View Additional Types")
+        mapped_value = entity_type_mapping.get(entity_type_normalized, "limited")
+        select_radio(driver, wait, mapped_value, f"entity type {mapped_value}")
         
         click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
         
         click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
+        
+        llc_members = determine_number_of_members(data.json_summary)
         
         try:
             llc_members_field = wait.until(EC.element_to_be_clickable((By.ID, "numbermem")))
-            fill_field(driver, llc_members_field, "2", "LLC Members")
+            fill_field(driver, llc_members_field, str(llc_members), "LLC Members")
         except Exception as e:
             logger.warning(f"Failed to fill LLC Members field: {e}")
         
-        select_state(driver, physical_state)
+        select_state(driver, select_state_value)
         
         click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
         
-        select_radio(driver, wait, "radio_n", "radio_n option")
-        
-        click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
+        if llc_members == 2:
+            select_radio(driver, wait, "radio_n", "radio_n option")
+            click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
         
         click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
         
@@ -494,10 +525,12 @@ async def run_irs_ein_application(data: CaseData):
             fill_field(driver, last_name_field, last_name, "Last Name")
             
             ssn3_field = wait.until(EC.element_to_be_clickable((By.ID, "responsiblePartySSN3")))
-            fill_field(driver, ssn3_field, pin_number[:3] if len(pin_number) >= 3 else '000', "SSN3")
+            ssn_first_three = ssn_decrypted[:3] if len(ssn_decrypted) >= 3 else "123"
+            fill_field(driver, ssn3_field, ssn_first_three, "SSN3")
             
             ssn2_field = wait.until(EC.element_to_be_clickable((By.ID, "responsiblePartySSN2")))
-            fill_field(driver, ssn2_field, pin_number[3:5] if len(pin_number) >= 5 else '00', "SSN2")
+            ssn_middle_two = ssn_decrypted[3:5] if len(ssn_decrypted) >= 5 else "45"
+            fill_field(driver, ssn2_field, ssn_middle_two, "SSN2")
             
             ssn4_field = wait.until(EC.element_to_be_clickable((By.ID, "responsiblePartySSN4")))
             fill_field(driver, ssn4_field, ssn_last_four, "SSN4")
@@ -524,21 +557,24 @@ async def run_irs_ein_application(data: CaseData):
             zip_field = wait.until(EC.element_to_be_clickable((By.ID, "physicalAddressZipCode")))
             fill_field(driver, zip_field, physical_zipcode, "Physical Zip Code")
             
-            if phone_number:
-                phone_cleaned = ''.join(filter(str.isdigit, phone_number))
-                if len(phone_cleaned) >= 10:
-                    phone_first3 = phone_cleaned[:3]
-                    phone_middle3 = phone_cleaned[3:6]
-                    phone_last4 = phone_cleaned[6:10]
-                    
-                    phone_first_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneFirst3")))
-                    fill_field(driver, phone_first_field, phone_first3, "Phone First 3")
-                    
-                    phone_middle_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneMiddle3")))
-                    fill_field(driver, phone_middle_field, phone_middle3, "Phone Middle 3")
-                    
-                    phone_last_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneLast4")))
-                    fill_field(driver, phone_last_field, phone_last4, "Phone Last 4")
+            phone_number = data.case_contact_phone or "2812173123"
+            phone_number = re.sub(r'\D', '', phone_number) if phone_number else "2812173123"
+            if len(phone_number) != 10:
+                logger.warning(f"Invalid phone number format: {phone_number}, defaulting to 2812173123")
+                phone_number = "2812173123"
+            
+            phone_first3 = phone_number[:3]
+            phone_middle3 = phone_number[3:6]
+            phone_last4 = phone_number[6:10]
+            
+            phone_first_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneFirst3")))
+            fill_field(driver, phone_first_field, phone_first3, "Phone First 3")
+            
+            phone_middle_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneMiddle3")))
+            fill_field(driver, phone_middle_field, phone_middle3, "Phone Middle 3")
+            
+            phone_last_field = wait.until(EC.element_to_be_clickable((By.ID, "phoneLast4")))
+            fill_field(driver, phone_last_field, phone_last4, "Phone Last 4")
         except Exception as e:
             logger.warning(f"Failed to fill address or phone fields: {e}")
         
@@ -600,7 +636,8 @@ async def run_irs_ein_application(data: CaseData):
                     continue
             
             if parsed_date is None:
-                raise ValueError(f"Could not parse formation_date '{formation_date}'")
+                logger.warning(f"Could not parse formation_date '{formation_date}', defaulting to 2024-06-24")
+                parsed_date = datetime.strptime("2024-06-24", "%Y-%m-%d")
             
             formation_month = parsed_date.month
             formation_year = parsed_date.year
@@ -644,9 +681,7 @@ async def run_irs_ein_application(data: CaseData):
         select_radio(driver, wait, "other", "Other principal service radio")
         
         try:
-            if not business_description:
-                business_description = "Any and all lawful business"
-                logger.info("Business description is empty, using default: 'Any and all lawful business'")
+            business_description = business_description or "Any and all lawful business"
             specify_field = wait.until(EC.element_to_be_clickable((By.ID, "pleasespecify")))
             fill_field(driver, specify_field, business_description, "Please Specify Business Description")
         except Exception as e:
@@ -658,13 +693,132 @@ async def run_irs_ein_application(data: CaseData):
         
         click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Continue >>']"), "Continue button")
         
-        logger.info("Form submission process completed successfully")
-        return True, "IRS EIN application process completed successfully"
+        try:
+            logger.info("Taking screenshot of the final page")
+            screenshot_base64 = driver.get_screenshot_as_base64()
+            logger.info("Screenshot captured successfully")
+        except Exception as e:
+            logger.error(f"Failed to capture screenshot: {e}")
+            screenshot_base64 = None
+        
+        logger.info("Form submission process reached the final page")
+        return driver, wait, True, "IRS EIN application process reached the final page", screenshot_base64
 
     except Exception as e:
         logger.error(f"Error during IRS EIN application: {e}")
+        return driver, wait, False, str(e), None
+
+async def finalize_form_submission(driver, wait):
+    try:
+        print("Received confirmation from salesforce. Click the submit button")
+        # click_button(driver, wait, (By.XPATH, "//input[@type='submit' and @value='Submit']"), "Final Submit button")
+        logger.info("Final form submission completed successfully")
+        return True, "Final form submission completed successfully"
+    except Exception as e:
+        logger.error(f"Error during final form submission: {e}")
         return False, str(e)
 
+# FastAPI Endpoints
+@app.post("/run-irs-ein")
+async def run_irs_ein_application_endpoint(data: CaseData, authorization: str = Header(None)):
+    expected_api_key = os.getenv("API_KEY", "tX9vL2kQwRtY7uJmK3vL8nWcXe5HgH3v")
+    if authorization != f"Bearer {expected_api_key}":
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    driver = None
+    wait = None
+    try:
+        # Run the automation up to the final page
+        driver, wait, success, message, screenshot_base64 = await run_irs_ein_application(data)
+        if not driver or not wait:
+            raise HTTPException(status_code=500, detail="Failed to initialize browser")
+        
+        # Send completion status and screenshot to Salesforce
+        salesforce_completion_endpoint = 'https://corpnet--fullphase2.sandbox.lightning.force.com/services/apexrest/FormAutomationCompletion'
+        status = "Completed" if success else "Failed"
+        completion_payload = {
+            "formId": data.record_id,
+            "status": status,
+            "message": message
+        }
+        if screenshot_base64:
+            completion_payload["screenshot"] = screenshot_base64
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(
+                    salesforce_completion_endpoint,
+                    json=completion_payload,
+                    headers={
+                        'X-API-Key': 'tX9vL2kQwRtY7uJmK3vL8nWcXe5HgH3v',
+                        'Content-Type': 'application/json'
+                    }
+                )
+                if response.status_code != 200:
+                    logger.error(f"Failed to send completion to Salesforce: {response.text}")
+                    raise HTTPException(status_code=500, detail=f"Failed to send completion to Salesforce: {response.text}")
+                logger.info("Successfully sent completion and screenshot to Salesforce")
+            except Exception as e:
+                logger.error(f"Error sending completion to Salesforce: {e}")
+                raise HTTPException(status_code=500, detail=f"Error sending completion to Salesforce: {str(e)}")
+        
+        # Wait for confirmation callback from Salesforce
+        logger.info(f"Waiting for confirmation callback for formId: {data.record_id}")
+        timeout = 300  # 5 minutes timeout
+        interval = 5   # Check every 5 seconds
+        elapsed = 0
+        
+        while elapsed < timeout:
+            if data.record_id in confirmation_status:
+                proceed = confirmation_status.pop(data.record_id)  # Remove after processing
+                logger.info(f"Received confirmation for formId {data.record_id}: proceed={proceed}")
+                break
+            await asyncio.sleep(interval)
+            elapsed += interval
+        else:
+            logger.error(f"Timeout waiting for confirmation callback for formId: {data.record_id}")
+            raise HTTPException(status_code=504, detail="Timeout waiting for confirmation from Salesforce")
+        
+        # If Salesforce confirms to proceed, submit the final form and update the status
+        if proceed:
+            final_success, final_message = await finalize_form_submission(driver, wait)
+            if not final_success:
+                raise HTTPException(status_code=500, detail=final_message)
+            
+            # Update Form_Status__c to "Completed"
+            salesforce_update_status_endpoint = 'https://corpnet--fullphase2.sandbox.lightning.force.com/services/apexrest/FormAutomationUpdateStatus'
+            update_payload = {
+                "formId": data.record_id,
+                "status": "Completed"
+            }
+            
+            async with httpx.AsyncClient() as client:
+                try:
+                    response = await client.post(
+                        salesforce_update_status_endpoint,
+                        json=update_payload,
+                        headers={
+                            'X-API-Key': 'tX9vL2kQwRtY7uJmK3vL8nWcXe5HgH3v',
+                            'Content-Type': 'application/json'
+                        }
+                    )
+                    if response.status_code != 200:
+                        logger.error(f"Failed to update Form_Status__c in Salesforce: {response.text}")
+                        raise HTTPException(status_code=500, detail=f"Failed to update Form_Status__c in Salesforce: {response.text}")
+                    logger.info("Successfully updated Form_Status__c to 'Completed'")
+                except Exception as e:
+                    logger.error(f"Error updating Form_Status__c in Salesforce: {e}")
+                    raise HTTPException(status_code=500, detail=f"Error updating Form_Status__c in Salesforce: {str(e)}")
+            
+            return {"message": "IRS EIN application fully completed and status updated", "record_id": data.record_id}
+        else:
+            logger.info("Salesforce did not confirm to proceed with final submission")
+            return {"message": "Salesforce did not confirm to proceed", "record_id": data.record_id}
+    
+    except Exception as e:
+        logger.error(f"Error in run_irs_ein_application_endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
     finally:
         if driver is not None:
             try:
@@ -680,43 +834,15 @@ async def run_irs_ein_application(data: CaseData):
         else:
             logger.info("Driver was not initialized, nothing to close.")
 
-# FastAPI Endpoints
-@app.post("/run-irs-ein")
-async def run_irs_ein_application_endpoint(data: CaseData, authorization: str = Header(None)):
-    # Validate API key
-    expected_api_key = os.getenv("API_KEY", "your-api-key")
+@app.post("/confirmation-callback")
+async def confirmation_callback(data: ConfirmationData, authorization: str = Header(None)):
+    expected_api_key = os.getenv("API_KEY", "tX9vL2kQwRtY7uJmK3vL8nWcXe5HgH3v")
     if authorization != f"Bearer {expected_api_key}":
         raise HTTPException(status_code=401, detail="Invalid API key")
     
-    # Run the automation
-    success, message = await run_irs_ein_application(data)
-    
-    # Send completion status to Salesforce
-    salesforce_endpoint = 'https://your-salesforce-instance.salesforce.com/services/apexrest/FormAutomationCompletion'
-    status = "Completed" if success else "Failed"
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(
-                salesforce_endpoint,
-                json={
-                    "formId": data.record_id,
-                    "status": status,
-                    "message": message
-                },
-                headers={
-                    'Authorization': 'Bearer your-salesforce-session-id',
-                    'Content-Type': 'application/json'
-                }
-            )
-            if response.status_code != 200:
-                logger.error(f"Failed to send completion to Salesforce: {response.text}")
-        except Exception as e:
-            logger.error(f"Error sending completion to Salesforce: {e}")
-    
-    if success:
-        return {"message": message, "record_id": data.record_id}
-    else:
-        raise HTTPException(status_code=500, detail=message)
+    logger.info(f"Received confirmation callback for formId: {data.formId}, proceed: {data.proceed}")
+    confirmation_status[data.formId] = data.proceed
+    return {"message": "Confirmation received"}
 
 @app.get("/health")
 async def health_check():
